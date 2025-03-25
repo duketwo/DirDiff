@@ -5,6 +5,7 @@ import argparse
 import tempfile
 from pathlib import Path
 import time
+import statistics
 
 def run_xxd_diff(file1, file2):
     """Run xxd diff between two files and return the diffstat output."""
@@ -100,6 +101,9 @@ def build_directory_tree(dir1, dir2):
     total_files = len(all_files)
     processed = 0
     
+    # Track files with changes for statistical analysis
+    changed_files_data = []
+    
     for file_path in all_files:
         parts = file_path.split(os.sep)
         current = tree
@@ -125,6 +129,13 @@ def build_directory_tree(dir1, dir2):
                     if insertions > 0 or deletions > 0:
                         status = "changed"
                         changes = (insertions, deletions)
+                        # Track this file for statistical analysis
+                        changed_files_data.append({
+                            "path": file_path,
+                            "insertions": insertions,
+                            "deletions": deletions,
+                            "total_changes": insertions + deletions
+                        })
                     else:
                         status = "unchanged"
                         changes = (0, 0)
@@ -135,7 +146,7 @@ def build_directory_tree(dir1, dir2):
                     current[part] = {"type": "dir", "children": {}}
                 current = current[part]["children"]
     
-    return tree
+    return tree, changed_files_data
 
 def print_tree(tree, prefix="", is_last=True, is_root=True):
     """Print the directory tree with visual indicators."""
@@ -195,10 +206,40 @@ def count_status(tree):
     
     return counts
 
+def identify_significant_changes(changed_files_data, threshold_multiplier=2.0):
+    """Identify files with significantly more changes than average."""
+    if not changed_files_data:
+        return []
+    
+    # Calculate statistics
+    total_changes = [file_data["total_changes"] for file_data in changed_files_data]
+    
+    try:
+        mean_changes = statistics.mean(total_changes)
+        stdev_changes = statistics.stdev(total_changes) if len(total_changes) > 1 else 0
+    except statistics.StatisticsError:
+        return []
+    
+    # Set threshold as mean + (multiplier * stdev)
+    threshold = mean_changes + (threshold_multiplier * stdev_changes)
+    
+    # Find files with changes above threshold
+    significant_files = [
+        file_data for file_data in changed_files_data
+        if file_data["total_changes"] > threshold
+    ]
+    
+    # Sort by total changes (descending)
+    significant_files.sort(key=lambda x: x["total_changes"], reverse=True)
+    
+    return significant_files, mean_changes, threshold
+
 def main():
     parser = argparse.ArgumentParser(description="Compare files between two directories")
     parser.add_argument("dir1", help="First directory (older)")
     parser.add_argument("dir2", help="Second directory (newer)")
+    parser.add_argument("--threshold", type=float, default=2.0, 
+                        help="Multiplier for standard deviation to identify significant changes (default: 2.0)")
     args = parser.parse_args()
     
     # Check if directories exist
@@ -217,7 +258,7 @@ def main():
     start_time = time.time()
     
     # Build and print the directory tree
-    tree = build_directory_tree(args.dir1, args.dir2)
+    tree, changed_files_data = build_directory_tree(args.dir1, args.dir2)
     print_tree(tree)
     
     # Print summary
@@ -227,6 +268,28 @@ def main():
     print(f"  Removed files:   {counts['removed']}")
     print(f"  Changed files:   {counts['changed']}")
     print(f"  Unchanged files: {counts['unchanged']}")
+    
+    # Identify and print files with significant changes
+    if changed_files_data:
+        significant_files, mean_changes, threshold = identify_significant_changes(
+            changed_files_data, args.threshold
+        )
+        
+        if significant_files:
+            print("\nFiles with Significant Changes:")
+            print(f"  (Average changes per file: {mean_changes:.2f}, Threshold: {threshold:.2f})")
+            print("-" * 80)
+            
+            for file_data in significant_files:
+                path = file_data["path"]
+                ins = file_data["insertions"]
+                dels = file_data["deletions"]
+                total = file_data["total_changes"]
+                
+                print(f"  {path}")
+                print(f"    Changes: {total} total (+{ins}, -{dels})")
+                print(f"    {total/mean_changes:.1f}x the average change rate")
+                print()
     
     elapsed_time = time.time() - start_time
     print(f"\nComparison completed in {elapsed_time:.2f} seconds")
